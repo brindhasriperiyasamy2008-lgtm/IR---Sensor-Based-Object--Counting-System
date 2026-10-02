@@ -1,0 +1,318 @@
+/*
+  IR Sensor Object Counting System - live dashboard served by the board.
+  Project by: Brindha Sri, Devadharshini, Dhanyasri
+  Board: ESP32 or ESP8266 (WiFi). IR module OUT -> IR_PIN, VCC -> 3.3V, GND -> GND.
+  LCD (I2C 0x27): SDA/SCL pins of your board.
+  Most IR modules (e.g. FC-51) pull OUT LOW when an object blocks the beam.
+  1) Set WIFI_SSID / WIFI_PASS   2) Upload   3) Open the IP shown in Serial Monitor (115200 baud).
+*/
+#include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#if defined(ESP32)
+  #include <WiFi.h>
+  #include <WebServer.h>
+  WebServer server(80);
+  const char* MCU = "ESP32";
+#else
+  #include <ESP8266WiFi.h>
+  #include <ESP8266WebServer.h>
+  ESP8266WebServer server(80);
+  const char* MCU = "ESP8266";
+  #ifndef IRAM_ATTR
+    #define IRAM_ATTR ICACHE_RAM_ATTR
+  #endif
+#endif
+
+const char* WIFI_SSID = "vivo Y400 5G";
+const char* WIFI_PASS = "deva@@123";
+const uint8_t IR_PIN = 2;               // ESP32 GPIO 2
+const unsigned long DEBOUNCE_MS = 200;
+
+unsigned long total = 0;
+unsigned long lastHit = 0;
+unsigned long lastDetection = 0;
+bool debounceOn = true;
+int previousSensorState = HIGH;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// The dashboard page lives in flash and is sent to the browser.
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>IR Sensor Object Counting System</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:#120a2a;color:#fff;font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;overflow-x:hidden;position:relative}
+.bg{position:fixed;inset:0;z-index:0;background:linear-gradient(120deg,#1b0b47,#0b2a5b,#0a4a4a,#4a0b4f);background-size:400% 400%;animation:shift 18s ease infinite}
+@keyframes shift{50%{background-position:100% 50%}}
+.blob{position:fixed;border-radius:50%;filter:blur(70px);opacity:.45;z-index:0;animation:float 12s ease-in-out infinite}
+.b1{width:340px;height:340px;background:#ff3d8b;top:-80px;left:-60px}
+.b2{width:300px;height:300px;background:#00e0c6;bottom:-60px;right:-40px;animation-delay:-4s}
+.b3{width:240px;height:240px;background:#ffb020;top:40%;left:55%;animation-delay:-8s}
+@keyframes float{50%{transform:translate(40px,-50px) scale(1.15)}}
+.wrap{position:relative;z-index:1;max-width:1200px;margin:auto;padding:22px 18px 30px}
+header{text-align:center;margin-bottom:22px}
+.pill{display:inline-flex;gap:8px;align-items:center;background:#ffffff18;border:1px solid #ffffff30;border-radius:30px;padding:5px 14px;font-size:12px;backdrop-filter:blur(8px)}
+.dot{width:9px;height:9px;border-radius:50%;background:#3dff9a;animation:ping 1.4s infinite}
+@keyframes ping{0%{box-shadow:0 0 0 0 #3dff9aaa}100%{box-shadow:0 0 0 10px #3dff9a00}}
+h1{margin:12px 0 6px;font-size:clamp(26px,5vw,46px);letter-spacing:-.02em;line-height:1.1;background:linear-gradient(90deg,#ff7ac6,#ffd166,#3dffd0,#7aa8ff,#ff7ac6);background-size:300% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:grad 6s linear infinite}
+@keyframes grad{to{background-position:300% 0}}
+.team{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin-top:12px}
+.member{padding:7px 16px;border-radius:30px;font-weight:700;font-size:13px;color:#1a0b3a;animation:bob 3s ease-in-out infinite}
+.member:nth-child(1){background:linear-gradient(90deg,#ff9ad5,#ffb86b)}
+.member:nth-child(2){background:linear-gradient(90deg,#7df9c8,#6ac6ff);animation-delay:-1s}
+.member:nth-child(3){background:linear-gradient(90deg,#c8a2ff,#ff8fb1);animation-delay:-2s}
+@keyframes bob{50%{transform:translateY(-5px)}}
+.grid{display:grid;gap:14px}
+.stats{grid-template-columns:1.4fr 1fr 1fr 1fr;margin-bottom:14px}
+.card{background:#ffffff14;border:1px solid #ffffff28;border-radius:18px;padding:18px;backdrop-filter:blur(12px);box-shadow:0 10px 40px #0004}
+.lbl{font-size:12px;opacity:.75}
+.val{font-size:34px;font-weight:800;letter-spacing:-.03em;margin:4px 0}
+.hero{background:linear-gradient(135deg,#ff3d8b,#ff8a3d 55%,#ffd166);color:#2a0a2a;border:0;position:relative;overflow:hidden}
+.hero .val{font-size:clamp(52px,9vw,84px);line-height:1;margin:8px 0}
+.hero.pop .val{animation:pop .45s}
+@keyframes pop{40%{transform:scale(1.18) rotate(-2deg)}}
+.hero:after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,#fff5 50%,transparent 70%);transform:translateX(-100%);animation:shine 4s infinite}
+@keyframes shine{60%,100%{transform:translateX(100%)}}
+.c2{background:linear-gradient(135deg,#00c6ff55,#0072ff55)}
+.c3{background:linear-gradient(135deg,#00e0a355,#00b09b55)}
+.c4{background:linear-gradient(135deg,#a855f755,#6d28d955)}
+.two{grid-template-columns:1.2fr 1fr;margin-bottom:14px}
+h2{font-size:15px;margin:0 0 12px}
+.scene{position:relative;height:150px;border-radius:14px;background:#0006;overflow:hidden}
+.belt{position:absolute;left:0;right:0;bottom:26px;height:10px;background:repeating-linear-gradient(90deg,#5b6b8f 0 16px,#3d4a6b 16px 32px);background-size:32px 100%;animation:belt 1s linear infinite}
+@keyframes belt{to{background-position:32px 0}}
+.tx,.rx{position:absolute;top:20px;width:26px;height:74px;border-radius:8px}
+.tx{left:calc(50% - 60px);background:linear-gradient(#ff3d8b,#ff8a3d)}
+.rx{left:calc(50% + 34px);background:linear-gradient(#3dffd0,#00b0ff)}
+.beam{position:absolute;top:56px;left:calc(50% - 34px);width:68px;height:3px;background:#ff2d55;box-shadow:0 0 12px 2px #ff2d55;border-radius:3px;animation:flick 1s infinite}
+@keyframes flick{50%{opacity:.55}}
+.scene.hit .beam{background:#fff;box-shadow:0 0 22px 6px #fff;animation:none}
+.box{position:absolute;bottom:36px;left:-50px;width:36px;height:36px;border-radius:8px;background:linear-gradient(135deg,#ffd166,#ff7a3d);box-shadow:0 4px 12px #0006}
+.box.go{animation:cross 1.6s linear forwards}
+@keyframes cross{to{left:calc(100% + 20px)}}
+.bstat{margin-top:10px;text-align:center;font-weight:700}
+.bstat.hit{color:#ff7ac6}.bstat.ok{color:#3dff9a}
+.bars{display:flex;align-items:flex-end;gap:6px;height:170px}
+.bar{flex:1;border-radius:6px 6px 0 0;min-height:4px;transition:height .5s;background:linear-gradient(#ff7ac6,#7aa8ff)}
+.bar:nth-child(3n){background:linear-gradient(#ffd166,#ff7a3d)}
+.bar:nth-child(3n+1){background:linear-gradient(#3dffd0,#00b0ff)}
+.axis{display:flex;justify-content:space-between;font-size:10px;opacity:.6;margin-top:6px}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:11px;opacity:.6;padding:6px}
+td{padding:9px 6px;border-top:1px solid #ffffff18;font-size:12px}
+tr.new{animation:slide .5s}
+@keyframes slide{from{opacity:0;transform:translateX(-20px);background:#ffffff30}}
+.tag{background:#3dff9a33;color:#7dffb8;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700}.targetBox{margin-top:14px;background:#0005;border:1px solid #ffffff25;border-radius:14px;padding:14px}.targetLine{display:flex;gap:8px}.targetInput{flex:1;border:0;border-radius:10px;padding:10px;font:inherit;font-weight:700;min-width:0}.targetBtn{width:auto;margin:0;background:linear-gradient(90deg,#ffd166,#ff8a3d)}.resetBtn{width:auto;margin:0;background:linear-gradient(90deg,#ff7ac6,#ff3d8b);color:#fff}.progress{height:12px;background:#0006;border-radius:10px;overflow:hidden;margin:12px 0 6px}.progressFill{height:100%;width:0;background:linear-gradient(90deg,#3dffd0,#7aa8ff);transition:width .35s}.targetStatus{text-align:center;font-weight:800;font-size:13px}.danger{animation:dangerPulse .7s infinite;background:#ff1744!important;color:#fff!important}.dangerCard{border-color:#ff1744!important;box-shadow:0 0 25px #ff174477!important}@keyframes dangerPulse{50%{box-shadow:0 0 25px #ff1744aa,0 0 50px #ff174466}}.targetDone{color:#fff}
+.row{display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid #ffffff18;font-size:12px}
+.row span{opacity:.7}
+.sw{display:flex;justify-content:space-between;align-items:center;background:#0004;border-radius:12px;padding:12px;margin-bottom:6px}
+.tog{width:44px;height:24px;border-radius:24px;background:#3dffa0;position:relative;cursor:pointer;flex:none;transition:.2s}
+.tog:after{content:"";position:absolute;right:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:.2s}
+.tog.off{background:#ffffff40}.tog.off:after{right:23px}
+button{font:inherit;font-weight:700;border:0;border-radius:12px;padding:10px 16px;cursor:pointer;color:#1a0b3a;background:linear-gradient(90deg,#3dffd0,#7aa8ff);margin-top:10px;width:100%}
+button:active{transform:scale(.97)}
+footer{text-align:center;font-size:11px;opacity:.6;margin-top:18px}
+@media(max-width:900px){.stats{grid-template-columns:1fr 1fr}.hero{grid-column:1/-1}.two{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:reduce){*{animation-duration:.01s!important}}
+</style></head>
+<body>
+<div class="bg"></div><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+<div class="wrap">
+<header>
+  <span class="pill"><span class="dot"></span><span id="link">Sensor connected</span> · <span id="clock">--:--:--</span></span>
+  <h1>IR Sensor Object Counting System</h1>
+  <div class="team"><span class="member">Brindha Sri</span><span class="member">Devadharshini</span><span class="member">Dhanyasri</span></div>
+</header>
+
+<section class="grid stats">
+  <div class="card hero" id="hero"><div class="lbl" id="totalLbl" style="opacity:.8">Total objects counted</div><div class="val" id="total">0</div><div class="lbl" style="opacity:.8">+<b id="chg">0</b> this session</div></div>
+  <div class="card c2"><div class="lbl">This minute</div><div class="val" id="perMin">0</div><div class="lbl">detections</div></div>
+  <div class="card c3"><div class="lbl">Rate / hour</div><div class="val" id="rate">0</div><div class="lbl">projected</div></div>
+  <div class="card c4"><div class="lbl">Last detection</div><div class="val" id="last">—</div><div class="lbl">ago</div></div>
+</section>
+
+<section class="card targetBox" id="targetCard">
+  <h2>🎯 Production Target & Alert</h2>
+  <div class="targetLine">
+    <input class="targetInput" id="targetInput" type="number" min="1" placeholder="Enter target count">
+    <button class="targetBtn" id="targetBtn">SET TARGET</button><button class="resetBtn" id="resetTarget">RESET TARGET</button>
+  </div>
+  <div class="progress"><div class="progressFill" id="progressFill"></div></div>
+  <div class="targetStatus" id="targetStatus">Set a target to start monitoring</div>
+</section>
+
+<section class="grid two">
+  <div class="card"><h2>Live IR beam</h2>
+    <div class="scene" id="scene"><div class="tx"></div><div class="rx"></div><div class="beam"></div><div class="belt"></div><div class="box" id="box"></div></div>
+    <div class="bstat ok" id="bstat">Beam clear</div>
+  </div>
+  <div class="card"><h2>Detections per 5 seconds</h2>
+    <div class="bars" id="bars"></div>
+    <div class="axis"><span>1 min ago</span><span>now</span></div>
+  </div>
+</section>
+
+<section class="grid two">
+  <div class="card"><h2>Recent detections</h2>
+    <table><thead><tr><th>ID</th><th>TIME</th><th>SENSOR</th><th>EVENT</th></tr></thead><tbody id="ev"></tbody></table>
+  </div>
+  <div class="card"><h2>System settings</h2>
+    <div class="sw"><div><b>Debounce filter</b><div class="lbl" id="dlbl">Enabled · ignores repeats</div></div><div class="tog" id="tog"></div></div>
+    <div class="row"><span>Sensor</span><b>IR beam break · GPIO 2</b></div>
+    <div class="row"><span>Controller</span><b id="mcu">ESP32</b></div>
+    <div class="row"><span>Response</span><b id="rtt">— ms</b></div>
+    <div class="row"><span>Uptime</span><b id="upt">00h 00m</b></div>
+    <button id="sim">＋ Simulate object</button>
+  </div>
+</section>
+<footer id="foot">Demo mode · auto-simulated objects · Project by Brindha Sri, Devadharshini &amp; Dhanyasri</footer>
+</div>
+<script>
+(()=>{
+const $=id=>document.getElementById(id),N=12;
+let total=0,chg=0,deb=true,live=false,seen=0,lastT=null,up=0,startT=Date.now(),stamps=[];
+let target=Number(localStorage.getItem('irTarget')||0),targetAlerted=false;
+const buckets=new Array(N).fill(0);
+const bars=$('bars');for(let i=0;i<N;i++){const b=document.createElement('div');b.className='bar';bars.appendChild(b)}
+
+function drawBars(){const m=Math.max(4,...buckets);[...bars.children].forEach((b,i)=>b.style.height=Math.max(3,buckets[i]/m*100)+'%')}
+function updateTarget(){
+  const input=$('targetInput');
+  const card=$('targetCard');
+  const fill=$('progressFill');
+  const status=$('targetStatus');
+  if(target>0) input.value=target;
+  if(!target){fill.style.width='0%';status.textContent='Set a target to start monitoring';card.classList.remove('dangerCard');return;}
+  const pct=Math.min(100,Math.round(total/target*100));
+  fill.style.width=pct+'%';
+  if(total>=target){
+    status.innerHTML='🚨 TARGET REACHED! <span class="targetDone">'+total+' / '+target+'</span> · Production completed';
+    status.classList.add('danger');card.classList.add('dangerCard');
+    if(!targetAlerted){targetAlerted=true;try{alert('🚨 TARGET REACHED!\n\nTarget: '+target+' objects\nCurrent count: '+total);}catch(e){}}
+  }else{
+    status.textContent=total+' / '+target+' objects · '+pct+'% completed';
+    status.classList.remove('danger');card.classList.remove('dangerCard');targetAlerted=false;
+  }
+}
+$('targetBtn').onclick=()=>{const v=parseInt($('targetInput').value,10);if(!v||v<1){alert('Please enter a valid target count.');return;}target=v;targetAlerted=false;localStorage.setItem('irTarget',target);updateTarget();};
+$('resetTarget').onclick=()=>{target=0;targetAlerted=false;localStorage.removeItem('irTarget');$('targetInput').value='';updateTarget();};
+$('targetInput').addEventListener('keydown',e=>{if(e.key==='Enter')$('targetBtn').click()});
+
+function stats(){
+  const now=Date.now();stamps=stamps.filter(t=>now-t<60000);
+  $('total').textContent=total.toLocaleString();$('chg').textContent=chg;
+  $('perMin').textContent=stamps.length;
+  const secs=live?Math.max(up,30):Math.max((now-startT)/1000,30);
+  $('rate').textContent=Math.round(chg/secs*3600);
+  if(lastT){const s=Math.floor((now-lastT)/1000);$('last').textContent=s<60?s+'s':Math.floor(s/60)+'m'}
+  $('clock').textContent=new Date().toLocaleTimeString([],{hour12:false});
+  updateTarget();
+}
+function detect(force){
+  const now=Date.now();
+  if(!force&&deb&&lastT&&now-lastT<500)return;
+  lastT=now;total++;chg++;stamps.push(now);buckets[N-1]++;
+  const tr=document.createElement('tr');tr.className='new';
+  tr.innerHTML='<td>#IR-'+total+'</td><td>'+new Date().toLocaleTimeString([],{hour12:false})+'</td><td>IR Sensor 01</td><td><span class="tag">DETECTED</span></td>';
+  $('ev').prepend(tr);while($('ev').rows.length>6)$('ev').lastElementChild.remove();
+  const h=$('hero');h.classList.remove('pop');void h.offsetWidth;h.classList.add('pop');
+  const bx=$('box');bx.classList.remove('go');void bx.offsetWidth;bx.classList.add('go');
+  setTimeout(()=>{$('scene').classList.add('hit');$('bstat').textContent='Beam broken!';$('bstat').className='bstat hit'},560);
+  setTimeout(()=>{$('scene').classList.remove('hit');$('bstat').textContent='Beam clear';$('bstat').className='bstat ok'},900);
+  drawBars();stats();
+}
+$('sim').onclick=()=>detect();
+$('tog').onclick=()=>{deb=!deb;$('tog').classList.toggle('off',!deb);$('dlbl').textContent=deb?'Enabled · ignores repeats':'Disabled · every break counts';if(live)fetch('/debounce?on='+(deb?1:0)).catch(()=>{})};
+
+setInterval(()=>{buckets.shift();buckets.push(0);drawBars()},5000);
+setInterval(stats,1000);
+
+// Demo mode: random objects until the ESP board answers
+(function demo(){if(!live)detect();setTimeout(demo,1200+Math.random()*2800)})();
+for(let i=0;i<4;i++)buckets[N-1-i]=Math.floor(Math.random()*4)+1;
+drawBars();updateTarget();stats();
+
+// Live mode: the ESP board serves this page and answers GET /data
+async function poll(){
+  const t0=performance.now();let j;
+  try{j=await(await fetch('/data',{cache:'no-store'})).json();if(typeof j.count!=='number')throw 0}catch(e){if(live){$('link').textContent='Connection lost'}return}
+  if(!live){live=true;total=seen=j.count;chg=0;stamps=[];buckets.fill(0);$('ev').innerHTML='';
+    $('totalLbl').textContent='Objects counted since power-on';$('sim').hidden=true;
+    $('foot').textContent='Live data from your IR sensor · Brindha Sri, Devadharshini & Dhanyasri';
+    if(j.mcu)$('mcu').textContent=j.mcu;if(deb!==!!j.deb)$('tog').click()}
+  $('link').textContent='Sensor connected';
+  if(j.count<seen){total=seen=j.count;chg=0}
+  for(let n=j.count-seen;n>0;n--)detect(true);
+  seen=j.count;up=j.up;lastT=j.count?Date.now()-j.ago*1000:null;
+  $('upt').textContent=String(Math.floor(up/3600)).padStart(2,'0')+'h '+String(Math.floor(up%3600/60)).padStart(2,'0')+'m';
+  $('rtt').textContent=Math.round(performance.now()-t0)+' ms';stats();
+}
+if(location.protocol.startsWith('http'))(async function loop(){await poll();setTimeout(loop,live?500:5000)})();
+})();
+</script></body></html>
+)rawliteral";
+
+void handleData() {
+  unsigned long n = total, up = millis() / 1000;
+  long ago = n ? (long)((millis() - lastHit) / 1000) : -1;
+  char buf[112];
+  snprintf(buf, sizeof(buf), "{\"count\":%lu,\"ago\":%ld,\"up\":%lu,\"deb\":%d,\"mcu\":\"%s\"}",
+           n, ago, up, debounceOn ? 1 : 0, MCU);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", buf);
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(IR_PIN, INPUT);
+
+  Wire.begin();
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Object Counter");
+  lcd.setCursor(0, 1);
+  lcd.print("Count: 0");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) { delay(300); Serial.print('.'); }
+  Serial.print("\nDashboard: http://");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", []() { server.send_P(200, "text/html", INDEX_HTML); });
+  server.on("/data", handleData);
+  server.on("/debounce", []() { debounceOn = server.arg("on") != "0"; server.send(200, "text/plain", "ok"); });
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+
+  int sensorState = digitalRead(IR_PIN);
+  unsigned long now = millis();
+
+  // Count once when the active-LOW sensor changes from HIGH to LOW.
+  if (sensorState == LOW && previousSensorState == HIGH) {
+    if (!debounceOn || lastDetection == 0 || now - lastDetection >= DEBOUNCE_MS) {
+      total++;
+      lastHit = now;
+      lastDetection = now;
+
+      lcd.setCursor(0, 1);
+      lcd.print("Count: ");
+      lcd.print(total);
+      lcd.print("     ");
+
+      Serial.print("Count: ");
+      Serial.println(total);
+    }
+  }
+
+  previousSensorState = sensorState;
+  delay(10);
+}
